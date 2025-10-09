@@ -1,0 +1,20 @@
+[project]
+name = "sgd-mds"
+version = "0.1.0"
+description = "SGD-based MDS with an sklearn-style API"
+requires-python = ">=3.10"
+dependencies = [
+  "torch>=2.2",
+  "numpy>=1.26",
+  "scipy>=1.11",
+  "scikit-learn>=1.4",
+  "pandas>=2.0",
+  "matplotlib>=3.7",
+]
+
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["."]
