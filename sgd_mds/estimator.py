@@ -1,7 +1,6 @@
 import numpy as np
 import torch
-from . import core, utils
-from . import stress
+from . import core, utils, stress, samplers
 
 
 class SGDMDS:
@@ -40,20 +39,15 @@ class SGDMDS:
         X = torch.randn(n, self.n_components, device=device)
 
         B = min(self.batch_size, max(1, n * (n - 1) // 2))
-        i_idx = torch.randint(0, n, (B,), device=device)
-        j_idx = torch.randint(0, n, (B,), device=device)
-
-        mask = i_idx == j_idx
-        while mask.any():
-            j_idx[mask] = torch.randint(0, n, (int(mask.sum()),), device=device)
-            mask = i_idx == j_idx
-        i_idx, j_idx = torch.minimum(i_idx, j_idx), torch.maximum(i_idx, j_idx)
-
-        deltas = D_t[i_idx, j_idx]
-        weights = torch.ones_like(deltas)
         h = float(self.lr_init)
 
         for _ in range(self.max_iter):
+            i_idx, j_idx = samplers.random_pairs(
+                n, B, device=device, allow_replace=True
+            )
+            deltas = D_t[i_idx, j_idx]
+            weights = torch.ones_like(deltas)
+
             core.sgd_step(X, i_idx, j_idx, deltas, weights, h)
 
         self.embedding_ = X.detach().cpu().numpy()
@@ -62,8 +56,8 @@ class SGDMDS:
         if n <= 1500:
             self.stress_ = float(stress.kruskal_stress_full(X, D_t).item())
         else:
-            ii = torch.zeros
-            jj = torch.zeros
+            S = min(self.stress_sample_size, max(1, n * (n - 1) // 2))
+            ii, jj = samplers.random_pairs(n, S, device=device, allow_replace=True)
             self.stress_ = float(stress.kruskal_stress_pairs(X, D_t, ii, jj).item())
 
         return self
