@@ -28,3 +28,6 @@ build/
 .coverage
 htmlcov/
 .pytest_cache/
+
+!datasets/
+!datasets/**/*.npy
