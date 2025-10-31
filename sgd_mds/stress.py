@@ -1,6 +1,26 @@
 import torch
 from .distances import full_square_distances, pairwise_distances
 
+@torch.no_grad()
+def _calculate_stress_from_components(
+    residuals: torch.Tensor,
+    deltas: torch.Tensor,
+    weights: torch.Tensor | None,
+    eps: float,
+) -> torch.Tensor:
+    """
+    Core helper to compute Kruskal Stress from pre-calculated components.
+    Stress = sqrt( Σ w*(res)² / Σ w*(delta)² )
+    """
+    if weights is None:
+        numerator = (residuals * residuals).sum()
+        denominator = (deltas * deltas).sum()
+    else:
+        numerator = (weights * (residuals * residuals)).sum()
+        denominator = (weights * (deltas * deltas)).sum()
+
+    return torch.sqrt(numerator / denominator.clamp_min(eps))
+
 
 @torch.no_grad()
 def kruskal_stress_full(
@@ -11,38 +31,34 @@ def kruskal_stress_full(
 ) -> torch.Tensor:
     """
     Calculate the exact Kruskal Stress value over all pairs.
-    Stress(X) = sqrt( Σ₍i<j₎ w_ij (‖x_i - x_j‖ - δ_ij)²  /  Σ₍i<j₎ w_ij δ_ij² )
+    Stress(X) = sqrt( Σ w_ij (‖x_i-x_j‖-δ_ij)² / Σ w_ij δ_ij² ) for i < j
 
-    - X: current embedding coordinates in R^(n * d)
-    - D_full: target distance matrix δ_ij
-    - weights: optional pair weights w_ij (default = 1)
-    - eps: denominator clamp to avoid dividing by zero
-
-    Used after optimization to evaluate the embedding.
+    Parameters
+    ----------
+    X : current embedding coordinates in R^(n * d)
+    D_full : target distance matrix δ_ij
+    weights : optional pair weights w_ij (default = 1)
+    eps : denominator clamp to avoid dividing by zero
     """
     D_hat = full_square_distances(X)
 
-    tri = torch.triu(torch.ones_like(D_full, dtype=torch.bool), diagonal=1)
+    triu_mask = torch.triu(torch.ones_like(D_full, dtype=torch.bool), diagonal=1)
 
-    r = (D_hat - D_full)[tri]
-    d = D_full[tri]
-
-    if weights is None:
-        num = (r * r).sum()
-        den = (d * d).sum().clamp_min(eps)
-    else:
+    residuals = (D_hat - D_full)[triu_mask]
+    deltas = D_full[triu_mask]
+    
+    w: torch.Tensor | None = None
+    if weights is not None:
         if weights.dim() == 2:
-            w = weights[tri]
+            w = weights[triu_mask]
         else:
-            w = weights
-            if w.numel() != int(tri.sum()):
+            if weights.numel() != deltas.numel():
                 raise ValueError(
-                    "weights length must match number of upper-tri pairs (i<j)."
+                    "1D weights length must match number of upper-tri pairs."
                 )
-        num = (w * (r * r)).sum()
-        den = (w * (d * d)).sum().clamp_min(eps)
+            w = weights
 
-    return torch.sqrt(num / den)
+    return _calculate_stress_from_components(residuals, deltas, w, eps)
 
 
 @torch.no_grad()
@@ -56,30 +72,21 @@ def kruskal_stress_pairs(
 ) -> torch.Tensor:
     """
     Calculate a sampled approximation of the Kruskal Stress using selected pairs.
-    Stress(X) = sqrt( Σ_k w_k (‖x_iₖ - x_jₖ‖ - δ_iₖjₖ)²  /  Σ_k w_k δ_iₖjₖ² )
+    Stress(X) = sqrt( Σ w_k (‖x_ik-x_jk‖-δ_ikjk)² / Σ w_k δ_ikjk² )
 
-    - X: current embedding coordinates in R^(n*d)
-    - D_full: full target distance matrix δ_ij
-    - i_idx, j_idx: sampled index tensors which define the pairs (i,j) to be evaluated
-    - weights: optional pair weights (default = 1)
-    - eps: denominator clamp to avoid dividing by zero
-
-    Used on large datasets to estimate global stress efficiently
+    Parameters
+    ----------
+    X : current embedding coordinates in R^(n*d)
+    D_full : full target distance matrix δ_ij
+    i_idx, j_idx : sampled index tensors which define the pairs to be evaluated
+    weights : optional pair weights (default = 1)
+    eps : denominator clamp to avoid dividing by zero
     """
     d_hat = pairwise_distances(X, i_idx, j_idx)
     deltas = D_full[i_idx, j_idx]
+    residuals = d_hat - deltas
 
-    if weights is None:
-        w = torch.ones_like(deltas)
-    else:
-        w = weights
-        if w.shape != deltas.shape:
-            raise ValueError(
-                "weights must have the same shape as the sampled pairs (B,)."
-            )
+    if weights is not None and weights.shape != deltas.shape:
+        raise ValueError("Weights must have the same shape as the sampled pairs.")
 
-    r = d_hat - deltas
-    num = (w * (r * r)).sum()
-    den = (w * (deltas * deltas)).sum().clamp_min(eps)
-
-    return torch.sqrt(num / den)
+    return _calculate_stress_from_components(residuals, deltas, weights, eps)
