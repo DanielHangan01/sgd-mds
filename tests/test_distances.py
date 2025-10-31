@@ -38,7 +38,7 @@ def test_pairwise_distances_simple_correctness(device):
 @pytest.mark.parametrize("device", available_devices())
 def test_pairwise_distances_matches_torch_cdist(device):
 
-    g = torch.Generator(device="cpu").manual_seed(0)
+    g = torch.Generator(device=device).manual_seed(0)
     X = torch.randn(7, 5, generator=g, device=device)
 
     i = torch.randint(0, X.size(0), (20,), device=device)
@@ -59,7 +59,7 @@ def test_pairwise_distances_matches_torch_cdist(device):
 
 @pytest.mark.parametrize("device", available_devices())
 def test_full_squareform_properties(device):
-    g = torch.Generator(device="cpu").manual_seed(1)
+    g = torch.Generator(device=device).manual_seed(1)
     X = torch.randn(6, 3, generator=g, device=device)
 
     D = full_square_distances(X)
@@ -71,7 +71,7 @@ def test_full_squareform_properties(device):
 
 @pytest.mark.parametrize("device", available_devices())
 def test_full_squareform_matches_cdist(device):
-    g = torch.Generator(device="cpu").manual_seed(2)
+    g = torch.Generator(device=device).manual_seed(2)
     X = torch.randn(8, 4, generator=g, device=device)
 
     D_ours = full_square_distances(X)
@@ -82,7 +82,7 @@ def test_full_squareform_matches_cdist(device):
 
 @pytest.mark.parametrize("device", available_devices())
 def test_full_vs_pairs_consistency(device):
-    g = torch.Generator(device="cpu").manual_seed(3)
+    g = torch.Generator(device=device).manual_seed(3)
     X = torch.randn(9, 2, generator=g, device=device)
 
     D_full = full_square_distances(X)
