@@ -7,30 +7,57 @@
 
 models_to_run:
 
-  - name: "SGD-MDS (Iter Stopper)"
+  - name: "SGD-MDS (Iteration Stopper)"
     class: "SGDMDS"
     params:
+      # Core Strategy
       stopper: "iterations"
-      # max_iter will be supplied from the command line
-      lr_init: 0.01
       scheduler: "constant"
+      # Hyperparameters
+      lr_init: 0.02
+      batch_size: 50000
+      # Fixed settings for this experiment
+      n_components: 2
       random_state: 42
 
   - name: "SGD-MDS (Threshold Stopper)"
     class: "SGDMDS"
     params:
+      # Core Strategy
       stopper: "threshold"
-      stopper_params:
-        threshold: 0.01
-        patience: 3
-      # max_iter will be supplied from the command line
-      lr_init: 0.01
       scheduler: "convergence"
+      # Hyperparameters
+      lr_init: 0.02 # Note: Threshold/Convergence works better with a higher initial LR
+      batch_size: 10000
+      stopper_params:
+        threshold: 0.005
+        patience: 5
       scheduler_params:
-        lr_final_phase1: 0.01
-        phase1_iters: 100
+        lr_final_phase1: 0.02
+        phase1_iters: 500
+      # Fixed settings for this experiment
+      n_components: 2
       random_state: 42
-      
+
+  - name: "SGD-MDS (Threshold Stopper)"
+    class: "SGDMDS"
+    params:
+      # Core Strategy
+      stopper: "threshold"
+      scheduler: "convergence"
+      # Hyperparameters
+      lr_init: 0.02 # Note: Threshold/Convergence works better with a higher initial LR
+      batch_size: 30000
+      stopper_params:
+        threshold: 0.005
+        patience: 5
+      scheduler_params:
+        lr_final_phase1: 0.02
+        phase1_iters: 500
+      # Fixed settings for this experiment
+      n_components: 2
+      random_state: 42
+
   - name: "Scikit-learn MDS"
     class: "SklearnMDS"
     params:
