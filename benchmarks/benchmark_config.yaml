@@ -20,7 +20,7 @@ models_to_run:
       n_components: 2
       random_state: 42
 
-  - name: "SGD-MDS (Threshold Stopper)"
+  - name: "SGD-MDS (Threshold Stopper, Large Batch)"
     class: "SGDMDS"
     params:
       # Core Strategy
@@ -58,11 +58,28 @@ models_to_run:
       n_components: 2
       random_state: 42
 
-  - name: "Scikit-learn MDS"
-    class: "SklearnMDS"
+  - name: "SGD-MDS (Inverse-Distance Weights)"
+    class: "SGDMDS"
     params:
-      dissimilarity: "precomputed"
-      n_init: 1
-      # max_iter will be supplied from the command line
+      stopper: "threshold"
+      scheduler: "convergence"
+      pair_weighting: "inverse_distance"
+      lr_init: 0.02
+      batch_size: 20000
+      stopper_params:
+        threshold: 0.005
+        patience: 5
+      scheduler_params:
+        lr_final_phase1: 0.02
+        phase1_iters: 500
+      n_components: 2
       random_state: 42
-      n_jobs: -1
+
+  #- name: "Scikit-learn MDS"
+  #  class: "SklearnMDS"
+  #  params:
+  #    dissimilarity: "precomputed"
+  #    n_init: 1
+      # max_iter will be supplied from the command line
+  #    random_state: 42
+  #    n_jobs: -1

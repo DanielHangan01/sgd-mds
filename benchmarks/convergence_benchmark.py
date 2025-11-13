@@ -20,6 +20,9 @@ def track_convergence(
     model_params: dict,
     device: torch.device,
     use_fair_stress: bool = False,
+    stress_weighting: str = utils.PAIR_WEIGHTING_UNIFORM,
+    weight_min_delta: float | None = None,
+    weight_floor_quantile: float | None = 0.01,
 ) -> tuple[list[int], list[float], list[float]]:
     """
     Tracks model convergence by repeatedly fitting with increasing max_iter.
@@ -34,6 +37,7 @@ def track_convergence(
     max_iters : The maximum number of iterations to track.
     model_params : A dictionary of parameters to initialize the model.
     use_fair_stress : If True, recalculates stress using our normalized formula.
+    stress_weighting : Weighting used when computing stress (non-uniform always recomputes).
     """
     model_name = model_class.__name__
     print(f"\n--- Tracking {model_name} Convergence ---")
@@ -44,6 +48,21 @@ def track_convergence(
     cumulative_time = 0
 
     D_t = torch.from_numpy(D_np).to(device)
+    weighting_mode = utils.normalize_pair_weighting(stress_weighting)
+    min_delta = weight_min_delta
+    if (
+        min_delta is None
+        and weighting_mode != utils.PAIR_WEIGHTING_UNIFORM
+        and weight_floor_quantile is not None
+    ):
+        tri = torch.triu_indices(D_t.size(0), D_t.size(0), offset=1, device=device)
+        sampled = D_t[tri[0], tri[1]]
+        min_delta = float(torch.quantile(sampled, float(weight_floor_quantile)).item())
+    weight_matrix = utils.compute_full_weights(
+        D_t,
+        weighting_mode,
+        min_delta=min_delta,
+    )
 
     for i in iter_points:
         print(f"\rRunning {model_name} for max_iter={i}/{max_iters}", end="")
@@ -58,9 +77,13 @@ def track_convergence(
         t_fit = time.perf_counter() - t0
         cumulative_time += t_fit
 
-        if use_fair_stress:
+        if use_fair_stress or weight_matrix is not None:
             X_emb_t = torch.from_numpy(X_emb_np).to(D_t.device)
-            stress = kruskal_stress_full(X_emb_t, D_t).item()
+            stress = kruskal_stress_full(
+                X_emb_t,
+                D_t,
+                weights=weight_matrix,
+            ).item()
         else:
             stress = model.stress_
 
@@ -109,14 +132,24 @@ def main(args: argparse.Namespace) -> None:
 
     # Run Convergence Benchmarks
     sgd_iters, sgd_stress, sgd_time = track_convergence(
-        SGDMDS, D_np, args.max_iter, sgd_mds_params,
-        device=resolved_device, 
-        use_fair_stress=False
+        SGDMDS,
+        D_np,
+        args.max_iter,
+        sgd_mds_params,
+        device=resolved_device,
+        use_fair_stress=False,
+        stress_weighting=args.stress_weighting,
+        weight_floor_quantile=args.stress_weight_floor_quantile,
     )
     sk_iters, sk_stress, sk_time = track_convergence(
-        SklearnMDS, D_np, args.max_iter, sklearn_mds_params, 
-        device=resolved_device, 
-        use_fair_stress=True
+        SklearnMDS,
+        D_np,
+        args.max_iter,
+        sklearn_mds_params,
+        device=resolved_device,
+        use_fair_stress=True,
+        stress_weighting=args.stress_weighting,
+        weight_floor_quantile=args.stress_weight_floor_quantile,
     )
 
     # Visualization
@@ -153,5 +186,18 @@ if __name__ == "__main__":
     parser.add_argument("--max_iter", type=int, default=100, help="Max iterations to track.")
     parser.add_argument("--device", type=str, default="auto", help="Device for SGDMDS.")
     parser.add_argument("--warmup_runs", type=int, default=5, help="Number of untimed runs to perform before benchmarking.")
+    parser.add_argument(
+        "--stress_weighting",
+        type=str,
+        default=utils.PAIR_WEIGHTING_CHOICES[0],
+        choices=utils.PAIR_WEIGHTING_CHOICES,
+        help="Weighting scheme applied when plotting stress curves.",
+    )
+    parser.add_argument(
+        "--stress_weight_floor_quantile",
+        type=float,
+        default=0.01,
+        help="Quantile used to clamp inverse-distance weights in stress calculations.",
+    )
     args = parser.parse_args()
     main(args)

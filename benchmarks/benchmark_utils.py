@@ -8,6 +8,7 @@ import torch
 import matplotlib.pyplot as plt
 from sklearn.metrics import pairwise_distances as sklearn_pairwise_distances
 
+from sgd_mds import utils
 from sgd_mds.stress import kruskal_stress_full
 
 class BenchmarkResult:
@@ -42,11 +43,33 @@ def fit_and_time_model(model: Any, D_np: np.ndarray) -> Tuple[np.ndarray, float]
     fit_time = time.perf_counter() - t0
     return embedding, fit_time
 
-def calculate_fair_stress(embedding_np: np.ndarray, D_np: np.ndarray, device: torch.device) -> float:
-    """Calculates the normalized Kruskal stress for any given embedding."""
+def calculate_fair_stress(
+    embedding_np: np.ndarray,
+    D_np: np.ndarray,
+    device: torch.device,
+    weighting: str = utils.PAIR_WEIGHTING_UNIFORM,
+    weight_min_delta: float | None = None,
+    weight_floor_quantile: float | None = 0.01,
+) -> float:
+    """Calculates the normalized (optionally weighted) Kruskal stress for any embedding."""
     D_t = torch.from_numpy(D_np).to(device)
     embedding_t = torch.from_numpy(embedding_np).to(device)
-    stress = kruskal_stress_full(embedding_t, D_t).item()
+    weighting_mode = utils.normalize_pair_weighting(weighting)
+    min_delta = weight_min_delta
+    if (
+        min_delta is None
+        and weighting_mode != utils.PAIR_WEIGHTING_UNIFORM
+        and weight_floor_quantile is not None
+    ):
+        tri = torch.triu_indices(D_t.size(0), D_t.size(0), offset=1, device=D_t.device)
+        sampled = D_t[tri[0], tri[1]]
+        min_delta = float(torch.quantile(sampled, float(weight_floor_quantile)).item())
+    weight_matrix = utils.compute_full_weights(
+        D_t,
+        weighting_mode,
+        min_delta=min_delta,
+    )
+    stress = kruskal_stress_full(embedding_t, D_t, weights=weight_matrix).item()
     return stress
 
 def print_summary(results: List[BenchmarkResult]):

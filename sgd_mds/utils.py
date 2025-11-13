@@ -6,6 +6,12 @@ import numpy as np
 import numpy.random
 import torch
 
+PAIR_WEIGHTING_UNIFORM = "uniform"
+PAIR_WEIGHTING_INVERSE_DISTANCE = "inverse_distance"
+PAIR_WEIGHTING_CHOICES = (
+    PAIR_WEIGHTING_UNIFORM,
+    PAIR_WEIGHTING_INVERSE_DISTANCE,
+)
 
 def set_seed(seed: Optional[int]) -> np.random.Generator:
     """
@@ -71,3 +77,62 @@ def resolve_device(device: str | torch.device) -> torch.device:
         return torch.device("cpu")
 
     return torch.device(device)
+
+
+def normalize_pair_weighting(weighting: Optional[str]) -> str:
+    """
+    Normalize a user-provided weighting name into one of the supported schemes.
+    """
+    if weighting is None:
+        return PAIR_WEIGHTING_UNIFORM
+
+    w = weighting.strip().lower()
+    alias_map = {
+        "inverse-distance": PAIR_WEIGHTING_INVERSE_DISTANCE,
+        "inv_distance": PAIR_WEIGHTING_INVERSE_DISTANCE,
+        "1/d": PAIR_WEIGHTING_INVERSE_DISTANCE,
+        "1overd": PAIR_WEIGHTING_INVERSE_DISTANCE,
+    }
+    w = alias_map.get(w, w)
+
+    if w not in PAIR_WEIGHTING_CHOICES:
+        opts = ", ".join(PAIR_WEIGHTING_CHOICES)
+        raise ValueError(f"Unknown pair weighting '{weighting}'. Supported: {opts}.")
+    return w
+
+
+def compute_pair_weights(
+    deltas: torch.Tensor,
+    weighting: str,
+    eps: float = 1e-12,
+    min_delta: float | None = None,
+) -> torch.Tensor:
+    """
+    Compute per-pair weights according to the requested weighting scheme.
+    """
+    if weighting == PAIR_WEIGHTING_UNIFORM:
+        return torch.ones_like(deltas)
+    if weighting == PAIR_WEIGHTING_INVERSE_DISTANCE:
+        floor = max(eps, float(min_delta) if min_delta is not None else eps)
+        clamped = torch.clamp(deltas, min=floor)
+        return torch.reciprocal(clamped)
+    raise ValueError(f"Unsupported weighting scheme: {weighting}")
+
+
+def compute_full_weights(
+    D_full: torch.Tensor,
+    weighting: str,
+    eps: float = 1e-12,
+    min_delta: float | None = None,
+) -> torch.Tensor | None:
+    """
+    Build a full (n x n) weight matrix for stress evaluation.
+    Returns None when weighting is uniform.
+    """
+    if weighting == PAIR_WEIGHTING_UNIFORM:
+        return None
+    weights = compute_pair_weights(D_full, weighting, eps, min_delta)
+    if weights.dim() == 2 and weights.size(0) == weights.size(1):
+        weights = weights.clone()
+        weights.fill_diagonal_(0.0)
+    return weights
