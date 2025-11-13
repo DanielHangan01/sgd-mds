@@ -11,6 +11,7 @@ def sgd_step(
     h: float,
     *,
     cap_m: bool = True,
+    max_pair_step: float | None = 1.0,
     eps: float = 1e-8,
     exact_max_update: bool = False,
 ) -> torch.Tensor:
@@ -35,7 +36,8 @@ def sgd_step(
     # Combine weight and learning rate, optionally cap to <= 1 for stability
     m = weights * h
     if cap_m:
-        m = torch.minimum(m, torch.ones_like(m))
+        cap_value = 1.0 if max_pair_step is None else float(max_pair_step)
+        m = torch.minimum(m, torch.full_like(m, cap_value))
 
     denom = dist.clamp_min(eps)
     scale = m * (res / denom)

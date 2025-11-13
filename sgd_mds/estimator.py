@@ -24,6 +24,10 @@ class SGDMDS:
             random_state: Optional[int] = 0,
             device: str = "auto",
             stress_sample_size: int = 200_000,
+            pair_weighting: str = "uniform",
+            pair_weighting_min_delta: float | None = None,
+            pair_weighting_floor_quantile: float | None = 0.01,
+            pair_weighting_max_step: float | None = 0.05,
     ):
         """
         Parameters
@@ -70,6 +74,24 @@ class SGDMDS:
 
         stress_sample_size : int, default=200_000
             Number of pairs to sample for stress calculation on large datasets.
+
+        pair_weighting : {"uniform", "inverse_distance"}, default="uniform"
+            Weighting applied to every pair update and stress computation.
+            "uniform" sets all w_ij = 1, while "inverse_distance"
+            sets w_ij = 1 / δ_ij (clamped for numerical stability).
+
+        pair_weighting_min_delta : float, optional
+            Explicit clamp applied to δ_ij before inverting them. If None, a
+            data-driven value derived from `pair_weighting_floor_quantile` is used.
+
+        pair_weighting_floor_quantile : float, optional
+            Quantile of the empirical distance distribution used as the clamp
+            when `pair_weighting_min_delta` is not provided. Set to None to disable
+            automatic flooring.
+
+        pair_weighting_max_step : float, optional
+            Maximum per-pair displacement factor allowed when using non-uniform
+            weightings (default 0.05, i.e., at most 5% of the discrepancy).
         """
         self.n_components = n_components
         self.stopper = stopper
@@ -82,6 +104,12 @@ class SGDMDS:
         self.random_state = random_state
         self.device = device
         self.stress_sample_size = stress_sample_size
+        self.pair_weighting = utils.normalize_pair_weighting(pair_weighting)
+        self.pair_weighting_min_delta = pair_weighting_min_delta
+        self.pair_weighting_floor_quantile = pair_weighting_floor_quantile
+        self.pair_weighting_max_step = pair_weighting_max_step
+        self._weight_eps = 1e-12
+        self.pair_weight_min_delta_: Optional[float] = None
 
         self.embedding_: Optional[np.ndarray] = None
         self.stress_: float = float("nan")
@@ -135,6 +163,24 @@ class SGDMDS:
 
         use_exact: bool = (self.stopper.lower() in {"threshold", "movement", "convergence"})
 
+        pair_weight_min_delta: Optional[float] = None
+        pair_weight_max_step = None
+        if self.pair_weighting != utils.PAIR_WEIGHTING_UNIFORM:
+            candidate = self.pair_weighting_min_delta
+            if candidate is None and self.pair_weighting_floor_quantile is not None:
+                tri = torch.triu_indices(n, n, offset=1, device=device)
+                sampled = D_t[tri[0], tri[1]]
+                q = float(torch.quantile(
+                    sampled,
+                    float(self.pair_weighting_floor_quantile)
+                ).item())
+                candidate = q
+            if candidate is None:
+                candidate = float(self._weight_eps)
+            pair_weight_min_delta = max(float(candidate), self._weight_eps)
+            pair_weight_max_step = self.pair_weighting_max_step
+        self.pair_weight_min_delta_ = pair_weight_min_delta
+
         user_stopper.reset()
         failsafe_stopper.reset()
         while True:
@@ -144,12 +190,27 @@ class SGDMDS:
                 n, B, device=device, allow_replace=True
             )
             deltas: torch.Tensor = D_t[i_idx, j_idx]
-            weights: torch.Tensor = torch.ones_like(deltas)
+            if self.pair_weighting == utils.PAIR_WEIGHTING_UNIFORM:
+                weights = torch.ones_like(deltas)
+            else:
+                weights = utils.compute_pair_weights(
+                    deltas,
+                    self.pair_weighting,
+                    self._weight_eps,
+                    min_delta=pair_weight_min_delta,
+                )
 
             max_update: Optional[torch.Tensor] = core.sgd_step(
-                X, i_idx, j_idx, deltas, weights, h, exact_max_update=use_exact
+                X,
+                i_idx,
+                j_idx,
+                deltas,
+                weights,
+                h,
+                exact_max_update=use_exact,
+                max_pair_step=pair_weight_max_step,
             )
-
+            
             status: Dict[str, Any] = {}
             if max_update is not None:
                 status["max_update"] = float(max_update.item())
@@ -166,11 +227,31 @@ class SGDMDS:
         self.embedding_ = X.detach().cpu().numpy()
 
         if n <= 1500:
-            self.stress_ = float(stress.kruskal_stress_full(X, D_t).item())
+            weight_matrix = utils.compute_full_weights(
+                D_t,
+                self.pair_weighting,
+                self._weight_eps,
+                min_delta=pair_weight_min_delta,
+            )
+            self.stress_ = float(
+                stress.kruskal_stress_full(X, D_t, weights=weight_matrix).item()
+            )
         else:
             S = min(self.stress_sample_size, max(1, n * (n - 1) // 2))
             ii, jj = samplers.random_pairs(n, S, device=device, allow_replace=True)
-            self.stress_ = float(stress.kruskal_stress_pairs(X, D_t, ii, jj).item())
+            pair_weights = None
+            if self.pair_weighting != utils.PAIR_WEIGHTING_UNIFORM:
+                pair_weights = utils.compute_pair_weights(
+                    D_t[ii, jj],
+                    self.pair_weighting,
+                    self._weight_eps,
+                    min_delta=pair_weight_min_delta,
+                )
+            self.stress_ = float(
+                stress.kruskal_stress_pairs(
+                    X, D_t, ii, jj, weights=pair_weights
+                ).item()
+            )
 
         return self
 

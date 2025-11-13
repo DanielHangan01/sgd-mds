@@ -13,6 +13,8 @@ This implementation is designed to be a fast and scalable alternative to classic
 - **GPU Acceleration** - Utilizes PyTorch to run computations on CUDA-enabled GPUs for significant speedups.
 - **Advanced Controls** - Includes modern features such as learning rate schedulers and intelligent stopping criteria (e.g., convergence detection).
 - **Flexible Benchmarking** - Comes with a benchmarking suite to compare performance and convergence behavior against other models.
+- **Configurable Pair Weighting** - Toggle between classic uniform weights and the common \(w_{ij} = 1 / \delta_{ij}\) choice without changing any code.
+  Automatic distance flooring keeps inverse-distance weights numerically stable.
 
 ---
 
@@ -135,6 +137,8 @@ python benchmarks/convergence_benchmark.py
 | `--n_samples` | Subsample the dataset for quick testing | - |
 | `--config` | Path to YAML configuration file defining models (`run_benchmark.py`) | `benchmarks/benchmark_config.yaml` |
 | `--warmup_runs` | Number of untimed warmup runs before benchmarking (`convergence_benchmark.py`) | - |
+| `--stress_weighting` | Weighting used when reporting stress (`uniform` or `inverse_distance`) | `uniform` |
+| `--stress_weight_floor_quantile` | Quantile used to clamp inverse-distance stresses (where supported) | `0.01` |
 
 **Examples:**
 ```bash
@@ -156,6 +160,12 @@ You can modify or extend the experiments by editing this file:
 - **Add or remove models:** Edit the `models_to_run` list.  
 - **Adjust hyperparameters:** Update the `params` dictionary for any model.  
 - **Create new experiments:** Copy the configuration file (e.g., `my_experiment.yaml`) and pass it via the `--config` argument.
+
+### Pair Weighting Options
+
+- The estimator accepts `pair_weighting="inverse_distance"` to enable \(w_{ij}=1 / \delta_{ij}\) both during training and when reporting `stress_`.
+- Extremely small distances are automatically floored (1st percentile by default) to avoid runaway updates; override via `pair_weighting_min_delta` or `pair_weighting_floor_quantile`. A `pair_weighting_max_step` cap keeps per-pair displacements modest (default 5% of the discrepancy).
+- Benchmark scripts expose `--stress_weighting` so every model is evaluated under the same metric.
 
 ---
 

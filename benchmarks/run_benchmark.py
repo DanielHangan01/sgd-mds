@@ -7,7 +7,10 @@ from sklearn.manifold import MDS as SklearnMDS
 from sklearn.metrics import pairwise_distances as sklearn_pairwise_distances
 
 from sgd_mds.estimator import SGDMDS
-from sgd_mds.utils import resolve_device
+from sgd_mds.utils import (
+    PAIR_WEIGHTING_CHOICES,
+    resolve_device,
+)
 
 from benchmark_utils import (
     load_dataset,
@@ -71,7 +74,14 @@ def main(args: argparse.Namespace) -> None:
             fit_time = time.perf_counter() - t0
             
             stress_device = device if model_class is SGDMDS else "cpu"
-            stress = calculate_fair_stress(embedding, D_np, stress_device)
+            stress = calculate_fair_stress(
+                embedding,
+                D_np,
+                stress_device,
+                weighting=args.stress_weighting,
+                weight_min_delta=getattr(model_instance, "pair_weight_min_delta_", None),
+                weight_floor_quantile=args.stress_weight_floor_quantile,
+            )
             
             n_iter = getattr(model_instance, 'n_iter_', 0)
             
@@ -105,9 +115,22 @@ if __name__ == "__main__":
     parser.add_argument("dataset", type=str, help="Name of the dataset folder.")
     parser.add_argument("--config", type=str, default="benchmarks/benchmark_config.yaml")
     parser.add_argument("--device", type=str, default="auto")
-    parser.add_argument("--max_iter", type=int, default=300)
+    parser.add_argument("--max_iter", type=int, default=10_000)
     parser.add_argument("--n_samples", type=int, default=None)
     parser.add_argument("--n_warmup", type=int, default=2, help="Number of untimed burn-in runs per model.")
     parser.add_argument("--n_trials", type=int, default=5, help="Number of timed trials to average per model.")
+    parser.add_argument(
+        "--stress_weighting",
+        type=str,
+        default=PAIR_WEIGHTING_CHOICES[0],
+        choices=PAIR_WEIGHTING_CHOICES,
+        help="Weighting applied when reporting benchmark stress metrics.",
+    )
+    parser.add_argument(
+        "--stress_weight_floor_quantile",
+        type=float,
+        default=0.01,
+        help="Quantile used to clamp inverse-distance stress calculations.",
+    )
     args = parser.parse_args()
     main(args)

@@ -9,6 +9,7 @@ import matplotlib.pyplot as plt
 from sklearn.manifold import MDS as SklearnMDS
 from sklearn.metrics import pairwise_distances as sklearn_pairwise_distances
 
+from sgd_mds import utils
 from sgd_mds.estimator import SGDMDS
 from sgd_mds.stress import kruskal_stress_full
 
@@ -64,8 +65,19 @@ def main(args: argparse.Namespace) -> None:
     X_emb_sgd_t = torch.from_numpy(X_emb_sgd_np).to(device)
     X_emb_sklearn_t = torch.from_numpy(X_emb_sklearn_np).to(device)
 
-    stress_sgd = kruskal_stress_full(X_emb_sgd_t, D_t).item()
-    stress_sklearn = kruskal_stress_full(X_emb_sklearn_t, D_t).item()
+    weighting_mode = utils.normalize_pair_weighting(args.stress_weighting)
+    min_delta = None
+    if weighting_mode != utils.PAIR_WEIGHTING_UNIFORM and args.stress_weight_floor_quantile is not None:
+        tri = torch.triu_indices(D_t.size(0), D_t.size(0), offset=1, device=D_t.device)
+        sampled = D_t[tri[0], tri[1]]
+        min_delta = float(torch.quantile(sampled, float(args.stress_weight_floor_quantile)).item())
+    weight_matrix = utils.compute_full_weights(
+        D_t,
+        weighting_mode,
+        min_delta=min_delta,
+    )
+    stress_sgd = kruskal_stress_full(X_emb_sgd_t, D_t, weights=weight_matrix).item()
+    stress_sklearn = kruskal_stress_full(X_emb_sklearn_t, D_t, weights=weight_matrix).item()
     
     print("\n--- Benchmark Summary ---")
     print(f"{'Metric':<25} | {'SGD-MDS':<20} | {'Scikit-learn MDS':<20}")
@@ -99,5 +111,18 @@ if __name__ == "__main__":
         description="Benchmark SGD-MDS against Scikit-learn's MDS on the Seismic dataset."
     )
     parser.add_argument("--device", type=str, default="auto", help="Device to run.")
+    parser.add_argument(
+        "--stress_weighting",
+        type=str,
+        default=utils.PAIR_WEIGHTING_CHOICES[0],
+        choices=utils.PAIR_WEIGHTING_CHOICES,
+        help="Weighting scheme applied when reporting normalized stress.",
+    )
+    parser.add_argument(
+        "--stress_weight_floor_quantile",
+        type=float,
+        default=0.01,
+        help="Quantile used to clamp inverse-distance weights in stress calculations.",
+    )
     args = parser.parse_args()
     main(args)
