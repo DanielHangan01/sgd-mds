@@ -115,7 +115,7 @@ if __name__ == "__main__":
     parser.add_argument("dataset", type=str, help="Name of the dataset folder.")
     parser.add_argument("--config", type=str, default="benchmarks/benchmark_config.yaml")
     parser.add_argument("--device", type=str, default="auto")
-    parser.add_argument("--max_iter", type=int, default=10_000)
+    parser.add_argument("--max_iter", type=int, default=1_000)
     parser.add_argument("--n_samples", type=int, default=None)
     parser.add_argument("--n_warmup", type=int, default=2, help="Number of untimed burn-in runs per model.")
     parser.add_argument("--n_trials", type=int, default=5, help="Number of timed trials to average per model.")

@@ -28,7 +28,7 @@ models_to_run:
       scheduler: "convergence"
       # Hyperparameters
       lr_init: 0.02 # Note: Threshold/Convergence works better with a higher initial LR
-      batch_size: 10000
+      batch_size: 100000
       stopper_params:
         threshold: 0.005
         patience: 5
@@ -64,14 +64,35 @@ models_to_run:
       stopper: "threshold"
       scheduler: "convergence"
       pair_weighting: "inverse_distance"
-      lr_init: 0.02
+      #lr_init: 1.0
       batch_size: 20000
+      pair_weighting_floor_quantile: 0.001
+      pair_weighting_max_step: 0.05
       stopper_params:
         threshold: 0.005
         patience: 5
-      scheduler_params:
-        lr_final_phase1: 0.02
-        phase1_iters: 500
+      #scheduler_params:
+      #  lr_final_phase1: 0.02
+      #  phase1_iters: 500
+      n_components: 2
+      random_state: 42
+
+  - name: "SGD-MDS (InvDist, Lower Floor)"
+    class: "SGDMDS"
+    params:
+      stopper: "threshold"
+      scheduler: "convergence"
+      pair_weighting: "inverse_distance"
+      pair_weighting_floor_quantile: 0.0001
+      pair_weighting_max_step: 0.05
+      #lr_init: 0.02
+      batch_size: 20000
+      stopper_params:
+        threshold: 0.003
+        patience: 8
+      #scheduler_params:
+      #  lr_final_phase1: 0.02
+      #  phase1_iters: 500
       n_components: 2
       random_state: 42
 

@@ -17,7 +17,7 @@ class SGDMDS:
             stopper: str = "threshold",
             stopper_params: Optional[Dict[str, Any]] = {'threshold': 0.03, 'patience': 3},
             max_iter: int = 500,  # Failsafe for convergence-based stoppers
-            lr_init: float = 1.0,
+            lr_init: float | str | None = "auto",
             scheduler: str = "convergence",
             scheduler_params: Optional[Dict[str, Any]] = {'lr_final_phase1': 0.1, 'phase1_iters': 30},
             batch_size: int = 50_000,
@@ -27,7 +27,8 @@ class SGDMDS:
             pair_weighting: str = "uniform",
             pair_weighting_min_delta: float | None = None,
             pair_weighting_floor_quantile: float | None = 0.01,
-            pair_weighting_max_step: float | None = 0.05,
+            pair_weighting_max_step: float | None = None,
+            paper_lr_epsilon: float = 0.1,
     ):
         """
         Parameters
@@ -49,9 +50,10 @@ class SGDMDS:
             The maximum number of iterations to run. Acts as a failsafe
             to prevent infinite loops with convergence-based stoppers.
 
-        lr_init : float, default=1.0
-            The initial learning rate. A high value is recommended as the
-            algorithm caps the effective step size.
+        lr_init : {"auto"} or float, default="auto"
+            Initial learning rate. When set to "auto"/None, the value is chosen
+            following the paper (lr_init = 1 / w_min). Provide a float to
+            override the automatic value.
 
         scheduler : str, default='convergence'
             The learning rate schedule. Common options:
@@ -90,14 +92,31 @@ class SGDMDS:
             automatic flooring.
 
         pair_weighting_max_step : float, optional
-            Maximum per-pair displacement factor allowed when using non-uniform
-            weightings (default 0.05, i.e., at most 5% of the discrepancy).
+            Maximum per-pair displacement factor. Defaults to 1.0 (paper setting)
+            when None, but can be reduced for extra stability.
+        
+        paper_lr_epsilon : float, default=0.1
+            Controls the final learning rate when automatic scheduling is enabled:
+            lr_final = paper_lr_epsilon / w_max.
         """
         self.n_components = n_components
         self.stopper = stopper
         self.stopper_params = stopper_params
         self.max_iter = max_iter
-        self.lr_init = lr_init
+        self.lr_init_requested: float | str | None = lr_init
+        self._auto_lr: bool = False
+        if isinstance(lr_init, str):
+            if lr_init.lower() != "auto":
+                raise ValueError(f"Unknown lr_init specifier: {lr_init!r}")
+            self._auto_lr = True
+            self.lr_init = None
+        elif lr_init is None:
+            self._auto_lr = True
+            self.lr_init = None
+        else:
+            if lr_init <= 0:
+                raise ValueError("lr_init must be > 0.")
+            self.lr_init = float(lr_init)
         self.scheduler = scheduler
         self.scheduler_params = scheduler_params
         self.batch_size = batch_size
@@ -108,8 +127,14 @@ class SGDMDS:
         self.pair_weighting_min_delta = pair_weighting_min_delta
         self.pair_weighting_floor_quantile = pair_weighting_floor_quantile
         self.pair_weighting_max_step = pair_weighting_max_step
+        self.paper_lr_epsilon = float(paper_lr_epsilon)
+        if self.paper_lr_epsilon <= 0:
+            raise ValueError("paper_lr_epsilon must be > 0.")
         self._weight_eps = 1e-12
         self.pair_weight_min_delta_: Optional[float] = None
+        self.weight_min_: float | None = None
+        self.weight_max_: float | None = None
+        self.lr_init_: float | None = self.lr_init
 
         self.embedding_: Optional[np.ndarray] = None
         self.stress_: float = float("nan")
@@ -144,27 +169,8 @@ class SGDMDS:
 
         B: int = min(self.batch_size, max(1, n * (n - 1) // 2))
 
-        s_params: Dict[str, Any] = self.scheduler_params or {}
-        scheduler = schedules.create_scheduler(
-            name=self.scheduler,
-            lr_init=self.lr_init,
-            max_iter=self.max_iter,
-            **s_params,
-        )
-
-        st_params: Dict[str, Any] = self.stopper_params or {}
-        user_stopper = stopping.create_stopper(
-            name=self.stopper,
-            max_iter=self.max_iter,
-            **st_params,
-        )
-
-        failsafe_stopper = stopping.MaxIterationsStopper(max_iter=self.max_iter)
-
-        use_exact: bool = (self.stopper.lower() in {"threshold", "movement", "convergence"})
-
         pair_weight_min_delta: Optional[float] = None
-        pair_weight_max_step = None
+        pair_weight_max_step = self.pair_weighting_max_step
         if self.pair_weighting != utils.PAIR_WEIGHTING_UNIFORM:
             candidate = self.pair_weighting_min_delta
             if candidate is None and self.pair_weighting_floor_quantile is not None:
@@ -178,8 +184,41 @@ class SGDMDS:
             if candidate is None:
                 candidate = float(self._weight_eps)
             pair_weight_min_delta = max(float(candidate), self._weight_eps)
-            pair_weight_max_step = self.pair_weighting_max_step
         self.pair_weight_min_delta_ = pair_weight_min_delta
+
+        weight_min, weight_max = self._compute_weight_extrema(D_t, pair_weight_min_delta)
+        self.weight_min_ = weight_min
+        self.weight_max_ = weight_max
+        lr_init_resolved, lr_release, lr_final = self._resolve_learning_rates(weight_min, weight_max)
+        self.lr_init_ = lr_init_resolved
+        self.lr_init = lr_init_resolved
+
+        scheduler_name = (self.scheduler or "constant").lower()
+        s_params: Dict[str, Any] = dict(self.scheduler_params or {})
+        if self._auto_lr:
+            if scheduler_name == "convergence":
+                s_params.setdefault("lr_final_phase1", lr_release)
+                s_params.setdefault("lr_min", lr_final)
+            elif scheduler_name == "exponential":
+                s_params.setdefault("lr_final", lr_final)
+
+        scheduler = schedules.create_scheduler(
+            name=self.scheduler,
+            lr_init=self.lr_init,
+            max_iter=self.max_iter,
+            **s_params,
+        )
+
+        st_params: Dict[str, Any] = dict(self.stopper_params or {})
+        user_stopper = stopping.create_stopper(
+            name=self.stopper,
+            max_iter=self.max_iter,
+            **st_params,
+        )
+
+        failsafe_stopper = stopping.MaxIterationsStopper(max_iter=self.max_iter)
+
+        use_exact: bool = (self.stopper.lower() in {"threshold", "movement", "convergence"})
 
         user_stopper.reset()
         failsafe_stopper.reset()
@@ -261,3 +300,41 @@ class SGDMDS:
         """
         self.fit(D, y)
         return self.embedding_
+
+    def _compute_weight_extrema(
+        self,
+        D_t: torch.Tensor,
+        min_delta: float | None,
+    ) -> tuple[float, float]:
+        eps = self._weight_eps
+        if self.pair_weighting == utils.PAIR_WEIGHTING_UNIFORM:
+            return 1.0, 1.0
+
+        if self.pair_weighting == utils.PAIR_WEIGHTING_INVERSE_DISTANCE:
+            floor = float(min_delta) if min_delta is not None else eps
+            floor = max(floor, eps)
+            w_max = 1.0 / floor
+            max_delta = torch.max(D_t).item()
+            max_delta = max(max_delta, floor)
+            w_min = 1.0 / max_delta
+            return w_min, w_max
+
+        return 1.0, 1.0
+
+    def _resolve_learning_rates(
+        self,
+        w_min: float,
+        w_max: float,
+    ) -> tuple[float, float, float]:
+        w_min = max(w_min, self._weight_eps)
+        w_max = max(w_max, self._weight_eps)
+
+        lr_release = 1.0 / w_max
+        lr_final = self.paper_lr_epsilon / w_max
+
+        if self._auto_lr or self.lr_init is None:
+            lr_init = 1.0 / w_min
+        else:
+            lr_init = float(self.lr_init)
+
+        return lr_init, lr_release, lr_final
