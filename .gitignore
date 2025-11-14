@@ -29,5 +29,4 @@ build/
 htmlcov/
 .pytest_cache/
 
-!datasets/
-!datasets/**/*.npy
+datasets/
