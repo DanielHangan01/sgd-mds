@@ -1,9 +1,12 @@
 from __future__ import annotations
+import time
 from typing import Optional, Dict, Any
 
 import numpy as np
 import torch
 from . import core, utils, stress, samplers, schedules, stopping
+
+_CONVERGENCE_UNIQUE_PAIR_THRESHOLD = 1_000_000
 
 
 class SGDMDS:
@@ -29,6 +32,9 @@ class SGDMDS:
             pair_weighting_floor_quantile: float | None = 0.01,
             pair_weighting_max_step: float | None = None,
             paper_lr_epsilon: float = 0.1,
+            track_convergence: bool = False,
+            convergence_log_every: int = 1,
+            convergence_sample_size: int | None = None,
     ):
         """
         Parameters
@@ -98,6 +104,18 @@ class SGDMDS:
         paper_lr_epsilon : float, default=0.1
             Controls the final learning rate when automatic scheduling is enabled:
             lr_final = paper_lr_epsilon / w_max.
+
+        track_convergence : bool, default=False
+            If True, logs the stress after every `convergence_log_every` iterations
+            so downstream code can visualize convergence without rerunning training.
+
+        convergence_log_every : int, default=1
+            Interval (in iterations) between recorded stress measurements. The
+            final iteration is always captured when tracking is enabled.
+
+        convergence_sample_size : int, optional
+            Number of pair samples used to approximate stress while tracking on
+            large datasets. Defaults to `stress_sample_size` when not provided.
         """
         self.n_components = n_components
         self.stopper = stopper
@@ -139,6 +157,17 @@ class SGDMDS:
         self.embedding_: Optional[np.ndarray] = None
         self.stress_: float = float("nan")
         self.n_iter_: int = 0
+        self.track_convergence = bool(track_convergence)
+        self.convergence_log_every = int(convergence_log_every)
+        if self.convergence_log_every <= 0:
+            raise ValueError("convergence_log_every must be >= 1.")
+        if convergence_sample_size is None:
+            self.convergence_sample_size: Optional[int] = None
+        else:
+            if convergence_sample_size <= 0:
+                raise ValueError("convergence_sample_size must be > 0.")
+            self.convergence_sample_size = int(convergence_sample_size)
+        self.convergence_history_: list[dict[str, float]] = []
 
     def fit(self, D: np.ndarray, y: Any = None) -> SGDMDS:
         """
@@ -166,8 +195,10 @@ class SGDMDS:
         D_t: torch.Tensor = torch.as_tensor(D, device=device)
 
         X: torch.Tensor = torch.randn(n, self.n_components, device=device)
+        self.convergence_history_ = []
 
-        B: int = min(self.batch_size, max(1, n * (n - 1) // 2))
+        total_pairs = n * (n - 1) // 2
+        B: int = min(self.batch_size, max(1, total_pairs))
 
         pair_weight_min_delta: Optional[float] = None
         pair_weight_max_step = self.pair_weighting_max_step
@@ -185,6 +216,76 @@ class SGDMDS:
                 candidate = float(self._weight_eps)
             pair_weight_min_delta = max(float(candidate), self._weight_eps)
         self.pair_weight_min_delta_ = pair_weight_min_delta
+
+        full_weight_matrix: torch.Tensor | None = None
+
+        def _get_full_weight_matrix() -> torch.Tensor | None:
+            nonlocal full_weight_matrix
+            if full_weight_matrix is None:
+                full_weight_matrix = utils.compute_full_weights(
+                    D_t,
+                    self.pair_weighting,
+                    self._weight_eps,
+                    min_delta=pair_weight_min_delta,
+                )
+            return full_weight_matrix
+
+        history_enabled = bool(self.track_convergence and total_pairs > 0)
+        history_use_full = False
+        history_pair_i: torch.Tensor | None = None
+        history_pair_j: torch.Tensor | None = None
+        history_pair_weights: torch.Tensor | None = None
+        history_log_every = self.convergence_log_every
+        history_timer_start = time.perf_counter() if history_enabled else None
+
+        if history_enabled and n <= 1500:
+            history_use_full = True
+        elif history_enabled:
+            sample_size = self.convergence_sample_size
+            if sample_size is None:
+                sample_size = self.stress_sample_size
+            if sample_size is None:
+                sample_size = total_pairs
+            sample_size = max(1, min(int(sample_size), total_pairs))
+            history_allow_replace = True
+            # Sampling unique pairs requires materializing an O(n^2) permutation.
+            # Only do so when feasible; otherwise sample with replacement to avoid
+            # CUDA scatter/gather assertions on very large datasets (e.g., Fashion-MNIST).
+            if sample_size >= total_pairs:
+                history_allow_replace = False
+            elif total_pairs <= _CONVERGENCE_UNIQUE_PAIR_THRESHOLD:
+                history_allow_replace = False
+            history_pair_i, history_pair_j = samplers.random_pairs(
+                n, sample_size, device=device, allow_replace=history_allow_replace
+            )
+            if self.pair_weighting != utils.PAIR_WEIGHTING_UNIFORM:
+                history_pair_weights = utils.compute_pair_weights(
+                    D_t[history_pair_i, history_pair_j],
+                    self.pair_weighting,
+                    self._weight_eps,
+                    min_delta=pair_weight_min_delta,
+                )
+
+        def _measure_convergence_stress() -> float:
+            if not history_enabled:
+                raise RuntimeError("Convergence tracking is disabled.")
+            if history_use_full:
+                weight_matrix = _get_full_weight_matrix()
+                value = stress.kruskal_stress_full(
+                    X,
+                    D_t,
+                    weights=weight_matrix,
+                )
+            else:
+                assert history_pair_i is not None and history_pair_j is not None
+                value = stress.kruskal_stress_pairs(
+                    X,
+                    D_t,
+                    history_pair_i,
+                    history_pair_j,
+                    weights=history_pair_weights,
+                )
+            return float(value.item())
 
         weight_min, weight_max = self._compute_weight_extrema(D_t, pair_weight_min_delta)
         self.weight_min_ = weight_min
@@ -222,6 +323,7 @@ class SGDMDS:
 
         user_stopper.reset()
         failsafe_stopper.reset()
+        iteration_count = 0
         while True:
             h: float = scheduler.get_lr()
             
@@ -249,6 +351,18 @@ class SGDMDS:
                 exact_max_update=use_exact,
                 max_pair_step=pair_weight_max_step,
             )
+            iteration_count += 1
+
+            if history_enabled and (iteration_count % history_log_every == 0):
+                assert history_timer_start is not None
+                elapsed = time.perf_counter() - history_timer_start
+                self.convergence_history_.append(
+                    {
+                        "iteration": iteration_count,
+                        "stress": _measure_convergence_stress(),
+                        "elapsed_time": elapsed,
+                    }
+                )
             
             status: Dict[str, Any] = {}
             if max_update is not None:
@@ -261,17 +375,24 @@ class SGDMDS:
 
         self.n_iter_ = user_stopper.current_iter
 
+        if history_enabled and history_timer_start is not None and self.n_iter_ > 0:
+            last_logged_iter = self.convergence_history_[-1]["iteration"] if self.convergence_history_ else 0
+            if last_logged_iter != self.n_iter_:
+                elapsed = time.perf_counter() - history_timer_start
+                self.convergence_history_.append(
+                    {
+                        "iteration": self.n_iter_,
+                        "stress": _measure_convergence_stress(),
+                        "elapsed_time": elapsed,
+                    }
+                )
+
         X -= X.mean(dim=0, keepdim=True)
 
         self.embedding_ = X.detach().cpu().numpy()
 
         if n <= 1500:
-            weight_matrix = utils.compute_full_weights(
-                D_t,
-                self.pair_weighting,
-                self._weight_eps,
-                min_delta=pair_weight_min_delta,
-            )
+            weight_matrix = _get_full_weight_matrix()
             self.stress_ = float(
                 stress.kruskal_stress_full(X, D_t, weights=weight_matrix).item()
             )
