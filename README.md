@@ -164,8 +164,32 @@ You can modify or extend the experiments by editing this file:
 ### Pair Weighting Options
 
 - The estimator accepts `pair_weighting="inverse_distance"` to enable \(w_{ij}=1 / \delta_{ij}\) both during training and when reporting `stress_`.
-- Extremely small distances are automatically floored (1st percentile by default) to avoid runaway updates; override via `pair_weighting_min_delta` or `pair_weighting_floor_quantile`. A `pair_weighting_max_step` cap keeps per-pair displacements modest (default 5% of the discrepancy).
+- Extremely small distances are automatically floored (1st percentile by default) to avoid runaway updates; override via `pair_weighting_min_delta` or `pair_weighting_floor_quantile`. A `pair_weighting_max_step` cap can be set to limit per-pair displacements (defaults to the paper value of 1.0, i.e., no extra reduction).
 - Benchmark scripts expose `--stress_weighting` so every model is evaluated under the same metric.
+
+### Learning-Rate Defaults
+
+`SGDMDS` now uses the paper's recommendations by default (`lr_init="auto"`):
+
+- \( \text{lr}_{\max} = 1 / w_{\min} \) where \(w_{\min}\) is the smallest pair weight.
+- \( \text{lr}_{\min} = \varepsilon / w_{\max} \) with \(\varepsilon = \text{paper\_lr\_epsilon}\) (default 0.1).
+- For the convergence scheduler, the first phase decays until the step cap stops binding (\(\text{lr} = 1 / w_{\max}\)), after which it switches to the 1/t regime.
+
+Set `lr_init` to a float to override the automatic value or tune `paper_lr_epsilon` for a different final rate.
+
+### Hyperparameter Tuning
+
+`benchmarks/hparam_tuner.py` performs grid-search style sweeps across stoppers, schedulers, and learning-rate/batch-size choices defined in `benchmarks/hparam_search.yaml` (edit this file to change the search space). Example:
+
+```bash
+python benchmarks/hparam_tuner.py fashion_mnist \
+  --n_samples 2000 \
+  --config benchmarks/hparam_search.yaml \
+  --top_k 5 \
+  --output tuning_results.json
+```
+
+Each experiment in the YAML supplies a `base_params` block (fed to `SGDMDS`) plus a `search` section whose dotted keys enumerate the values to try. The tuner prints the best configurations per experiment and optionally saves the full result table as JSON.
 
 ---
 

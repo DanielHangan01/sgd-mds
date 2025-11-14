@@ -1,0 +1,61 @@
+experiments:
+  - name: "threshold_convergence_uniform"
+    base_params:
+      stopper: "threshold"
+      scheduler: "convergence"
+      lr_init: 0.02
+      batch_size: 40000
+      stopper_params:
+        threshold: 0.004
+        patience: 4
+      scheduler_params:
+        lr_final_phase1: 0.02
+        phase1_iters: 500
+      n_components: 2
+      random_state: 42
+    search:
+      lr_init: [0.01, 0.02, 0.04]
+      batch_size: [20000, 40000, 60000]
+      stopper_params.threshold: [0.003, 0.004, 0.005]
+      stopper_params.patience: [3, 5, 8]
+      scheduler_params.phase1_iters: [300, 500, 700]
+
+  - name: "iterations_constant_uniform"
+    base_params:
+      stopper: "iterations"
+      scheduler: "constant"
+      lr_init: 0.01
+      batch_size: 50000
+      max_iter: 800
+      n_components: 2
+      random_state: 0
+    search:
+      lr_init: [0.01, 0.02]
+      batch_size: [30000, 50000, 70000]
+      max_iter: [500, 800, 1200]
+
+  - name: "inverse_distance_convergence"
+    base_params:
+      stopper: "threshold"
+      scheduler: "convergence"
+      pair_weighting: "inverse_distance"
+      lr_init: 0.02
+      batch_size: 25000
+      pair_weighting_floor_quantile: 0.005
+      pair_weighting_max_step: 0.05
+      stopper_params:
+        threshold: 0.004
+        patience: 6
+      scheduler_params:
+        lr_final_phase1: 0.02
+        phase1_iters: 600
+      n_components: 2
+      random_state: 7
+    search:
+      lr_init: [0.01, 0.02, 0.03]
+      batch_size: [20000, 30000, 40000]
+      pair_weighting_floor_quantile: [0.001, 0.005, 0.01]
+      pair_weighting_max_step: [0.05, 0.1, null]
+      stopper_params.threshold: [0.003, 0.004]
+      stopper_params.patience: [4, 8, 12]
+      max_iter: [500, 800, 1200]
