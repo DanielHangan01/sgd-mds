@@ -30,3 +30,4 @@ htmlcov/
 .pytest_cache/
 
 datasets/
+!datasets/.gitkeep
